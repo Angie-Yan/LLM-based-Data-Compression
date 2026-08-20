@@ -51,8 +51,8 @@ def get_main_args() -> argparse.Namespace:
     # path related
     parser.add_argument("--mode", type=str, choices=["compress", "decompress"], required=True,
                          help="Mode: compress or decompress")
-    parser.add_argument("--input_path", type=str, default="data/text8",
-                         help="Input path: For compress mode, dataset path. For decompress mode, compression file path.")
+    parser.add_argument("--input_path", type=str,
+                        help="Input path: For compress mode, dataset path. For decompress mode, compression file path.")
     parser.add_argument("--output_path", type=str, help="Output path: For compress mode, compression file path. "
                                                           "For decompress mode, reconstruction text file path.")
     parser.add_argument("--text_input", type=str, required=False, help="Direct text input for LLM inference.")
