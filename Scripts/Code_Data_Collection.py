@@ -1,126 +1,107 @@
 import os
-# 设置 Hugging Face 镜像站
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import random
-import glob
 from datasets import load_dataset
 
-# ============================
-# 配置
-# ============================
-
-OUTPUT_PATH = "/root/yanzhe/yanzhe/LLM-DC/data/mixed_dataset_50mb.txt"
-ROCKSDB_PATH = "/root/yanzhe/yanzhe/rocksdb"
-TARGET_SIZE_MB = 10  # 收集到的数据集大小
+# Configuration
+OUTPUT_DIR = "data"
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "mixed_code_dataset.txt")
+TARGET_SIZE_MB = 1
 TARGET_SIZE_BYTES = TARGET_SIZE_MB * 1024 * 1024
 
-# 随机混合数据时的权重（你可自己调整）
+# Data mix sampling weights (can be adjusted)
 WEIGHTS = {
     "mbpp": 1,
     "humaneval": 1,
     "humaneval_x": 1,
-    "rocksdb": 2,  # 本地代码多，权重稍大
+    "rocksdb": 1,
 }
 
-# ============================
-# 工具函数
-# ============================
 
 def load_mbpp():
-    ds = load_dataset("mbpp", split="train")
-    samples = []
-    for item in ds:
-        if item.get("code"):
-            samples.append(item["code"])
-    print(f"[MBPP] Loaded {len(samples)} samples.")
-    return samples
-
-# def load_humaneval():
-#     # ds = load_dataset("openai/openai_humaneval", split="test")
-#     ds = load_dataset("openai_humaneval", split="test")
-#     samples = []
-#     for item in ds:
-#         samples.append(item["prompt"] + "\n" + item["canonical_solution"])
-#     print(f"[Humaneval] Loaded {len(samples)} samples.")
-#     return samples
-#
-# def load_humaneval_x():
-#     ds = load_dataset("zai-org/humaneval-x", split="test")
-#     samples = []
-#     for item in ds:
-#         for lang, code in item["solutions"].items():
-#             if code:
-#                 samples.append(f"# Language: {lang}\n" + code)
-#     print(f"[Humaneval-X] Loaded {len(samples)} samples.")
-#     return samples
-
-def load_rocksdb():
-    CODE_EXT = ["*.cc", "*.h", "*.cpp", "*.c", "*.hpp"]
-    files = []
-    for ext in CODE_EXT:
-        files += glob.glob(os.path.join(ROCKSDB_PATH, "**", ext), recursive=True)
-
-    code_pieces = []
-    for f in files:
-        try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fp:
-                code_pieces.append(fp.read())
-        except:
-            pass
-
-    print(f"[rocksdb] Loaded {len(code_pieces)} code files.")
-    return code_pieces
+    try:
+        ds = load_dataset("google-research-datasets/mbpp", "sanitized", split="train")
+        samples = [item["code"] for item in ds if item.get("code")]
+        print(f"[MBPP] Loaded {len(samples)} samples.")
+        return samples
+    except Exception as e:
+        print(f"[MBPP] Failed to load: {e}")
+        return []
 
 
-# ============================
-# 主函数：混合生成数据集
-# ============================
+def load_humaneval():
+    try:
+        ds = load_dataset("openai/openai_humaneval", split="test")
+        samples = [f"{item['prompt']}\n{item['canonical_solution']}" for item in ds]
+        print(f"[Humaneval] Loaded {len(samples)} samples.")
+        return samples
+    except Exception as e:
+        print(f"[Humaneval] Failed to load: {e}")
+        return []
+
+
+def load_humaneval_x():
+    try:
+        ds = load_dataset("THUDM/humaneval-x", "python", split="test")
+        samples = [f"# Language: Python\n{item['declaration']}\n{item['canonical_solution']}" for item in ds if item.get("canonical_solution")]
+        print(f"[Humaneval-X] Loaded {len(samples)} samples.")
+        return samples
+    except Exception as e:
+        print(f"[Humaneval-X] Failed to load: {e}")
+        return []
+
+
+def load_rocksdb_online():
+    """Load C++ code snippets online from CodeSearchNet C++ subset as a proxy for RocksDB-like C++ code."""
+    try:
+        ds = load_dataset("code_search_net", "cpp", split="train[:500]")
+        samples = [item["whole_func_string"] for item in ds if item.get("whole_func_string")]
+        print(f"[RocksDB/C++] Loaded {len(samples)} samples online.")
+        return samples
+    except Exception as e:
+        print(f"[RocksDB/C++] Failed to load online: {e}")
+        return []
+
 
 def main():
-    print("Loading datasets...")
-
-    mbpp_data = load_mbpp()
-    # humaneval_data = load_humaneval()
-    # humaneval_x_data = load_humaneval_x()
-    rocksdb_data = load_rocksdb()
+    print("Fetching code datasets online...")
 
     sources = [
-        ("mbpp", mbpp_data),
-        # ("humaneval", humaneval_data),
-        # ("humaneval_x", humaneval_x_data),
-        ("rocksdb", rocksdb_data),
+        ("mbpp", load_mbpp()),
+        ("humaneval", load_humaneval()),
+        ("humaneval_x", load_humaneval_x()),
+        ("rocksdb", load_rocksdb_online()),
     ]
 
-    # 权重展开机制
+    # Filter out empty datasets
+    active_sources = [(name, data) for name, data in sources if len(data) > 0]
+    if not active_sources:
+        raise RuntimeError("No datasets were successfully loaded. Please check your network connection.")
+
     weighted_sources = []
-    for name, data in sources:
+    for name, data in active_sources:
         weighted_sources += [(name, data)] * WEIGHTS[name]
 
-    print("\nStart mixing ...")
+    print("\nMixing and generating 1MB benchmark dataset...")
     output = []
     size = 0
 
     while size < TARGET_SIZE_BYTES:
         src_name, src_data = random.choice(weighted_sources)
-        if len(src_data) == 0:
-            continue
-
         sample = random.choice(src_data)
         output.append(f"\n# ===== Source: {src_name} =====\n")
         output.append(sample)
         output.append("\n\n")
 
-        size = sum(len(s) for s in output)
+        size = sum(len(s.encode("utf-8")) for s in output)
+        print(f"Current size: {size / (1024 * 1024):.2f} MB", end="\r")
 
-        print(f"Current size: {size/1024/1024:.2f} MB", end="\r")
-
-    print("\n\nWriting output...")
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as fp:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as fp:
         fp.write("".join(output))
 
-    print(f"\n========== DONE ==========")
-    print(f"Final dataset size: {size/1024/1024:.2f} MB")
-    print(f"Output saved to {OUTPUT_PATH}")
+    print(f"\n\n========== DONE ==========")
+    print(f"Final dataset size: {size / (1024 * 1024):.2f} MB")
+    print(f"Output saved to relative path: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
