@@ -39,7 +39,7 @@ Compress a raw text dataset into a binary file:
 # Compress plain-text dataset
 python -m compression.arithmetic_coding \
     --mode "compress" \
-    --model_name "gpt2" \
+    --model_name "Qwen2.5-0.5B" \
     --input_path "data/<path_to_your_dataset>" \
     --output_path "out.bin" \
     --context_length 1024 \
@@ -54,7 +54,7 @@ Reconstruct the original text from the compressed binary file:
 ```bash
 python -m compression.arithmetic_coding \
     --mode "decompress" \
-    --model_name "Qwen/Qwen2.5-0.5B" \
+    --model_name "Qwen2.5-0.5B" \
     --input_path "out.bin" \
     --context_length 1024 \
     --batch_size 256 \
@@ -68,7 +68,7 @@ Run rank-based compression and decompression verification:
 ```bash
 # Basic run without LoRA
 python Fast_Rank_Compression.py \
-    --model_name "Qwen/Qwen2.5-0.5B" \
+    --model_name "Qwen2.5-0.5B" \
     --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
     --batch_size 256
@@ -77,7 +77,7 @@ python Fast_Rank_Compression.py \
 Run with custom LoRA weights
 ```bash
 python Fast_Rank_Compression.py \
-    --model_name "Qwen/Qwen2.5-0.5B" \
+    --model_name "Qwen2.5-0.5B" \
     --lora_path "checkpoints/qwen_0.5b_lora" \
     --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
@@ -95,7 +95,7 @@ Medusa-accelerated rank compression utilizes parallel decoding heads to speed up
 ```bash
 # Standard run with pre-trained Medusa heads
 python Medusa_Compression.py \
-    --model_name "Qwen/Qwen2.5-0.5B" \
+    --model_name "Qwen2.5-0.5B" \
     --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
     --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
@@ -106,7 +106,7 @@ Run with a subset of active heads (e.g., test 3 active heads (total heads > 3) w
 
 ```bash
 python Medusa_Compression.py \
-    --model_name "Qwen/Qwen2.5-0.5B" \
+    --model_name "Qwen2.5-0.5B" \
     --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
     --num_active_heads 3 \
     --input_file "data/<path_to_your_dataset>" \
