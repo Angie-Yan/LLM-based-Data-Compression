@@ -72,7 +72,7 @@ def get_main_args() -> argparse.Namespace:
     parser.add_argument("--first_n_tokens", type=int, default=200000, help="Number of tokens to compress")
     parser.add_argument("--use_kv_cache", action="store_true", help="Enable KV cache for compression")
     parser.set_defaults(use_kv_cache=True)
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for LLM inference")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for LLM inference")
 
     # compression related (AC only)
     parser.add_argument("--reduce_tokens", action="store_true", help="Restrict token space to tokens seen in data")
