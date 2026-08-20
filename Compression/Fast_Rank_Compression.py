@@ -359,8 +359,8 @@ def main():
     parser.add_argument("--context_length", type=int, default=1024, help="Maximum context length")
     parser.add_argument("--window_length", type=int, default=512, help="Sliding window length")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input text file to compress")
-    parser.add_argument("--compressed_file", type=str, default="output.bin", help="Path to save the compressed binary file")
-    parser.add_argument("--output_file", type=str, default="decoded_output.txt", help="Path to save the reconstructed text file")
+    parser.add_argument("--compressed_file", type=str, default="compressed_data.txt", help="Path to save the compressed binary file")
+    parser.add_argument("--output_file", type=str, default="decoded_text.txt", help="Path to save the reconstructed text file")
     
     # Precision control parameter
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"], help="Model loading precision")
