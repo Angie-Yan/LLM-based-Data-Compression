@@ -19,7 +19,7 @@ data/
 For code compression, we provide a zero-configuration script to automatically download and construct a 1MB mixed multi-language code dataset (sampling from MBPP, HumanEval, HumanEval-X, and C++ repositories). Simply run:
 
 ```bash
-python scripts/prepare_code_data.py
+python scripts/Code_Data_Collection.py
 ```
 
 ## Data Compression
