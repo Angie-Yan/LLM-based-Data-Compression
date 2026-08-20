@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 from peft import PeftModel
 
 # ==========================================
-# Medusa Head 结构（需要和训练时完全一致）
+# Medusa Head Structure (need to be as same as training)
 # ==========================================
 
 class MedusaHead(nn.Module):
@@ -86,7 +86,7 @@ def get_kv_len(past_key_values):
 
 
 # ==========================================
-# GPU 显存 / 精度 工具
+# GPU显存 / 精度 工具
 # ==========================================
 
 DTYPE_MAP = {
@@ -553,35 +553,34 @@ class MedusaRankDecoder:
 # ==========================================
 # Main
 # ==========================================
-
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen1.5-0.5B")
-    parser.add_argument("--lora_path", type=str, default="")
+    parser = argparse.ArgumentParser(description="Medusa-accelerated rank compression and decompression script.")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-0.5B", help="Base model name or local path.")
+    parser.add_argument("--lora_path", type=str, default=None, help="Path to fine-tuned LoRA weights (optional).")
     parser.add_argument("--medusa_heads_dir", type=str, required=True,
-                        help="Trained Medusa heads's Location")
+                        help="Directory path containing trained Medusa heads.")
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"],
-                        help="模型加载精度: fp16 / fp32 / bf16")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--context_length", type=int, default=1024)
-    parser.add_argument("--window_length", type=int, default=512)
+                        help="Model precision: fp16 / fp32 / bf16")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for processing.")
+    parser.add_argument("--context_length", type=int, default=1024, help="Maximum context length.")
+    parser.add_argument("--window_length", type=int, default=512, help="Sliding window length.")
     parser.add_argument("--num_active_heads", type=int, default=None,
-                        help="压缩/解压时实际使用的medusa head数量（前n个），"
-                             "默认使用训练目录里保存的全部head数。"
-                             "必须满足 1 <= n <= 训练时的num_heads，且无需重新训练。")
-    parser.add_argument("--input_file", type=str, required=True)
-    parser.add_argument("--compressed_file", type=str, default="output.txt")
-    parser.add_argument("--output_file", type=str, default="decoded_output.txt")
+                        help="Number of active Medusa heads (first n) to use during compression/decompression. "
+                             "Defaults to all heads saved in the trained directory. "
+                             "Must satisfy 1 <= n <= total_trained_heads.")
+    parser.add_argument("--input_file", type=str, required=True, help="Path to raw text input file.")
+    parser.add_argument("--compressed_file", type=str, default="medusa_compressed_data.txt", help="Path to output compressed binary file.")
+    parser.add_argument("--output_file", type=str, default="medusa_decoded_text.txt", help="Path to output reconstructed text file.")
     args = parser.parse_args()
 
     if not os.path.exists(args.input_file):
-        raise FileNotFoundError(f"找不到输入文件: {args.input_file}")
+        raise FileNotFoundError(f"Input file not found: {args.input_file}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = DTYPE_MAP[args.dtype]
 
     if device == "cpu" and args.dtype == "fp16":
-        print("警告: CPU 上 fp16 支持较差（算子缺失/极慢），建议改用 fp32 或 bf16")
+        print("Warning: fp16 has poor performance/support on CPU. Consider using fp32 or bf16 instead.")
 
     print(f"Loading Model: {args.model_name} on {device} (dtype={args.dtype})")
 
@@ -590,6 +589,7 @@ def main():
         args.model_name, torch_dtype=dtype, device_map=device
     )
     if args.lora_path:
+        print(f"Applying LoRA weights from: {args.lora_path}")
         model = PeftModel.from_pretrained(model, args.lora_path, torch_dtype=dtype)
         model = model.merge_and_unload()
     model.eval()
@@ -598,16 +598,16 @@ def main():
     medusa_heads = MedusaHeadCollection.load(args.medusa_heads_dir, device, dtype=dtype)
     medusa_heads.eval()
 
-    # ---- num_active_heads 默认值 & 合法性校验 ----
+    # ---- Validation for num_active_heads ----
     if args.num_active_heads is None:
         args.num_active_heads = medusa_heads.num_heads
     if not (1 <= args.num_active_heads <= medusa_heads.num_heads):
         raise ValueError(
-            f"--num_active_heads={args.num_active_heads} 不合法，"
-            f"必须在 [1, {medusa_heads.num_heads}] 范围内"
-            f"（{medusa_heads.num_heads} 是 {args.medusa_heads_dir} 里训练好的head总数）"
+            f"Invalid --num_active_heads={args.num_active_heads}. "
+            f"Must be within range [1, {medusa_heads.num_heads}] "
+            f"({medusa_heads.num_heads} is total trained heads in {args.medusa_heads_dir})."
         )
-    print(f"本次压缩/解压使用 {args.num_active_heads} / {medusa_heads.num_heads} 个 Medusa heads")
+    print(f"Active heads configured: {args.num_active_heads} / {medusa_heads.num_heads}")
 
     encoder = MedusaRankEncoder(model, medusa_heads, tokenizer, device, args)
     decoder = MedusaRankDecoder(model, medusa_heads, tokenizer, device, args)
@@ -617,13 +617,13 @@ def main():
 
     is_lossless = (original_processed_tokens == decoded_token_ids)
     print(f"\n{'*'*30}")
-    print(f"无损验证: {'通过 (Lossless)' if is_lossless else '失败 (Mismatch)'}")
+    print(f"Lossless Verification: {'PASSED' if is_lossless else 'FAILED (Mismatch)'}")
     if not is_lossless:
-        print(f"长度对比: 原始 {len(original_processed_tokens)} vs 解码 {len(decoded_token_ids)}")
+        print(f"Length Mismatch: Original ({len(original_processed_tokens)}) vs Decoded ({len(decoded_token_ids)})")
         for i in range(min(len(original_processed_tokens), len(decoded_token_ids))):
             if original_processed_tokens[i] != decoded_token_ids[i]:
-                print(f"首次不匹配位置: {i}")
-                print(f"原值: {original_processed_tokens[i]} | 解码值: {decoded_token_ids[i]}")
+                print(f"First mismatch at index: {i}")
+                print(f"Original: {original_processed_tokens[i]} | Decoded: {decoded_token_ids[i]}")
                 break
     print('*' * 30)
 
