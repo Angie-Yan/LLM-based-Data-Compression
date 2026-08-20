@@ -1,5 +1,13 @@
 # LLMzip-code
 
+## Data Compression
+
+```bash
+cd Compression
+```
+
+### 1. Arithmetic Coding
+
 ### 2. Rank Coding
 
 Run rank-based compression and decompression verification:
