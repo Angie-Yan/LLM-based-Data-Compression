@@ -41,6 +41,7 @@ python -m compression.arithmetic_coding \
     --mode "compress" \
     --model_name "gpt2" \
     --input_path "data/<path_to_your_dataset>" \
+    --output_path "out.bin" \
     --context_length 1024 \
     --batch_size 256 \
     --print_results
@@ -54,6 +55,7 @@ Reconstruct the original text from the compressed binary file:
 python -m compression.arithmetic_coding \
     --mode "decompress" \
     --model_name "Qwen/Qwen2.5-0.5B" \
+    --input_path "out.bin" \
     --context_length 1024 \
     --batch_size 256 \
     --print_results
