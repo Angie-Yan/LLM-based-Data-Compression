@@ -1,6 +1,6 @@
 # LLMzip-code
 
-# 2. Rank Coding
+### 2. Rank Coding
 
 Run rank-based compression and decompression verification:
 
