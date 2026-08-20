@@ -24,10 +24,6 @@ python scripts/Code_Data_Collection.py
 
 ## Data Compression
 
-```bash
-cd Compression
-```
-
 ### Arithmetic Coding
 
 Arithmetic Coding (AC) provides near-optimal entropy coding based on the probability distribution predicted by the language model. This script supports both compression and decompression pipelines with optional global mask space reduction.
@@ -37,7 +33,7 @@ Compress a raw text dataset into a binary file:
 
 ```bash
 # Compress plain-text dataset
-python -m compression.arithmetic_coding \
+python Compression/Pure_AC.py \
     --mode "compress" \
     --model_name "Qwen2.5-0.5B" \
     --input_path "data/<path_to_your_dataset>" \
@@ -52,7 +48,7 @@ python -m compression.arithmetic_coding \
 Reconstruct the original text from the compressed binary file:
 
 ```bash
-python -m compression.arithmetic_coding \
+python Compression/Pure_AC.py \
     --mode "decompress" \
     --model_name "Qwen2.5-0.5B" \
     --input_path "out.bin" \
@@ -67,7 +63,7 @@ Run rank-based compression and decompression verification:
 
 ```bash
 # Basic run without LoRA
-python Fast_Rank_Compression.py \
+python Compression/Fast_Rank_Compression.py \
     --model_name "Qwen2.5-0.5B" \
     --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
@@ -76,7 +72,7 @@ python Fast_Rank_Compression.py \
 
 Run with custom LoRA weights
 ```bash
-python Fast_Rank_Compression.py \
+python Compression/Fast_Rank_Compression.py \
     --model_name "Qwen2.5-0.5B" \
     --lora_path "checkpoints/qwen_0.5b_lora" \
     --input_file "data/<path_to_your_dataset>" \
@@ -94,7 +90,7 @@ Medusa-accelerated rank compression utilizes parallel decoding heads to speed up
 
 ```bash
 # Standard run with pre-trained Medusa heads
-python Medusa_Compression.py \
+python Compression/Medusa_Compression.py \
     --model_name "Qwen2.5-0.5B" \
     --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
     --input_file "data/<path_to_your_dataset>" \
@@ -105,7 +101,7 @@ python Medusa_Compression.py \
 Run with a subset of active heads (e.g., test 3 active heads (total heads > 3) without retraining)
 
 ```bash
-python Medusa_Compression.py \
+python Compression/Medusa_Compression.py \
     --model_name "Qwen2.5-0.5B" \
     --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
     --num_active_heads 3 \
