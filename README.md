@@ -1,5 +1,27 @@
 # LLMzip-code
 
+## Data Preparation
+
+We evaluate our compression framework on both general text and source code benchmarks:
+
+### 1. Plain-Text Dataset (Wikipedia)
+For text compression, we use the preprocessed **Simple English Wikipedia** dataset available on Kaggle:
+- **Download:** [Plain-text Wikipedia SimpleEnglish (Kaggle)](https://www.kaggle.com/datasets/ffatty/plain-text-wikipedia-simpleenglish)
+
+Please download the dataset manually and place the extracted text file under the `data/` directory:
+```text
+data/
+└── wiki_simpleenglish.txt
+```
+
+### 2. Code Dataset
+
+For code compression, we provide a zero-configuration script to automatically download and construct a 1MB mixed multi-language code dataset (sampling from MBPP, HumanEval, HumanEval-X, and C++ repositories). Simply run:
+
+```bash
+python scripts/prepare_code_data.py
+```
+
 ## Data Compression
 
 ```bash
