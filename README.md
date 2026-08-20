@@ -38,7 +38,7 @@ Run rank-based compression and decompression verification:
 # Basic run without LoRA
 python Fast_Rank_Compression.py \
     --model_name "Qwen/Qwen2.5-0.5B" \
-    --input_file "data/sample.txt" \
+    --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
     --batch_size 256
 ```
@@ -48,7 +48,7 @@ Run with custom LoRA weights
 python Fast_Rank_Compression.py \
     --model_name "Qwen/Qwen2.5-0.5B" \
     --lora_path "checkpoints/qwen_0.5b_lora" \
-    --input_file "data/sample.txt" \
+    --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
     --batch_size 256
 ```
@@ -66,7 +66,7 @@ Medusa-accelerated rank compression utilizes parallel decoding heads to speed up
 python Medusa_Compression.py \
     --model_name "Qwen/Qwen2.5-0.5B" \
     --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
-    --input_file "data/sample.txt" \
+    --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
     --batch_size 256
 ```
@@ -78,7 +78,7 @@ python Medusa_Compression.py \
     --model_name "Qwen/Qwen2.5-0.5B" \
     --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
     --num_active_heads 3 \
-    --input_file "data/sample.txt" \
+    --input_file "data/<path_to_your_dataset>" \
     --dtype "fp16" \
     --batch_size 256
 ```
