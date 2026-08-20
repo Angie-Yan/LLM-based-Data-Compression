@@ -4,7 +4,7 @@
 
 We evaluate our compression framework on both general text and source code benchmarks:
 
-### 1. Plain-Text Dataset (Wikipedia)
+### Plain-Text Dataset (Wikipedia)
 For text compression, we use the preprocessed **Simple English Wikipedia** dataset available on Kaggle:
 - **Download:** [Plain-text Wikipedia SimpleEnglish (Kaggle)](https://www.kaggle.com/datasets/ffatty/plain-text-wikipedia-simpleenglish)
 
@@ -14,7 +14,7 @@ data/
 └── wiki_simpleenglish.txt
 ```
 
-### 2. Code Dataset
+### Code Dataset
 
 For code compression, we provide a zero-configuration script to automatically download and construct a 1MB mixed multi-language code dataset (sampling from MBPP, HumanEval, HumanEval-X, and C++ repositories). Simply run:
 
@@ -28,9 +28,38 @@ python scripts/Code_Data_Collection.py
 cd Compression
 ```
 
-### 1. Arithmetic Coding
+### Arithmetic Coding
 
-### 2. Rank Coding
+Arithmetic Coding (AC) provides near-optimal entropy coding based on the probability distribution predicted by the language model. This script supports both compression and decompression pipelines with optional global mask space reduction.
+
+#### 1. Compress
+Compress a raw text dataset into a binary file:
+
+```bash
+# Compress plain-text dataset
+python -m compression.arithmetic_coding \
+    --mode "compress" \
+    --model_name "gpt2" \
+    --input_path "data/<path_to_your_dataset>" \
+    --context_length 1024 \
+    --batch_size 256 \
+    --print_results
+```
+
+#### Decompress
+
+Reconstruct the original text from the compressed binary file:
+
+```bash
+python -m compression.arithmetic_coding \
+    --mode "decompress" \
+    --model_name "Qwen/Qwen2.5-0.5B" \
+    --context_length 1024 \
+    --batch_size 256 \
+    --print_results
+```
+
+### Rank Coding
 
 Run rank-based compression and decompression verification:
 
@@ -53,11 +82,11 @@ python Fast_Rank_Compression.py \
     --batch_size 256
 ```
 
-### 3. Speculative compression (SDMC)
+### Speculative compression (SDMC)
 
 
 
-### 4. Medusa Compression
+### Medusa Compression
 
 Medusa-accelerated rank compression utilizes parallel decoding heads to speed up the compression and decompression pipeline.
 
