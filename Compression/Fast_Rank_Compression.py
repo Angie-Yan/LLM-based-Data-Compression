@@ -33,10 +33,6 @@ def slice_kv_cache(past_key_values, window_length):
 # VRAM Measuring Function
 # ==========================================
 def warmup_and_reset_peak_memory(model, input_ids, device):
-    """
-    在正式计时前做一次前向，触发 cuDNN autotune / allocator 的一次性开销，
-    然后立刻 reset_peak_memory_stats，保证后面测到的 peak 仅反映真实阶段显存占用。
-    """
     if device != "cuda":
         return
     torch.cuda.synchronize()
@@ -339,7 +335,7 @@ class FastRankDecoder:
         with open(output_text_path, 'w', encoding='utf-8') as f_out:
             f_out.write(decoded_text)
 
-        # --- 打印统计 ---
+        # ---print results---
         print(f"\n\n[Decoder 耗时与显存分解]")
         print(f"  -> GPU 模型推理耗时: {time_gpu_infer:.3f} s ({time_gpu_infer / total_time:.1%})")
         print(f"  -> GPU TopK计算耗时: {time_gpu_topk:.3f} s ({time_gpu_topk / total_time:.1%})")
@@ -356,25 +352,27 @@ class FastRankDecoder:
 # Main Function
 # ==========================================
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen1.5-0.5B")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--context_length", type=int, default=1024)
-    parser.add_argument("--window_length", type=int, default=512)
-    parser.add_argument("--input_file", type=str, required=True, help="要压缩的本地纯文本文件路径")
-    parser.add_argument("--compressed_file", type=str, default="output.txt", help="输出的压缩文件路径")
-    parser.add_argument("--output_file", type=str, default="decoded_output.txt", help="解码后输出的文本路径")
-    # 新增精度控制参数
-    parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"], help="模型加载精度")
+    parser = argparse.ArgumentParser(description="Rank Compression and Decompression Tool")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-0.5B", help="Pretrained model name or path")
+    parser.add_argument("--lora_path", type=str, default=None, help="Path to LoRA fine-tuned weights (optional)")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for processing")
+    parser.add_argument("--context_length", type=int, default=1024, help="Maximum context length")
+    parser.add_argument("--window_length", type=int, default=512, help="Sliding window length")
+    parser.add_argument("--input_file", type=str, required=True, help="Path to the input text file to compress")
+    parser.add_argument("--compressed_file", type=str, default="output.bin", help="Path to save the compressed binary file")
+    parser.add_argument("--output_file", type=str, default="decoded_output.txt", help="Path to save the reconstructed text file")
+    
+    # Precision control parameter
+    parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"], help="Model loading precision")
     args = parser.parse_args()
 
-    # 检查输入文件是否存在
+    # Verify input file existence
     if not os.path.exists(args.input_file):
-        raise FileNotFoundError(f"找不到输入文件: {args.input_file}")
+        raise FileNotFoundError(f"Input file not found: {args.input_file}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 映射精度参数到 torch 数据类型
+    # Map precision string to torch dtype
     dtype_mapping = {
         "fp32": torch.float32,
         "fp16": torch.float16,
@@ -382,38 +380,40 @@ def main():
     }
     model_dtype = dtype_mapping[args.dtype]
 
-    print(f"Loading Model: {args.model_name} on {device} with precision {args.dtype}")
+    print(f"Loading base model: {args.model_name} on {device} with precision {args.dtype}")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    lora_model_path = ("/root/yanzhe/yanzhe/FineZip-main/finezip/finetuned_models/"
-                       "h100/Qwen0.5b/wiki_05_128_r16")
 
-    # 应用映射的 precision 数据类型
+    # Load base model
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=model_dtype,
         device_map=device
     )
-    # Lora权重,不用的时候记得注释掉
-    model = PeftModel.from_pretrained(model, lora_model_path, torch_dtype=model_dtype)
+
+    # Load LoRA weights if specified
+    if args.lora_path:
+        print(f"Loading LoRA weights from: {args.lora_path}")
+        model = PeftModel.from_pretrained(model, args.lora_path, torch_dtype=model_dtype)
+
     model.eval()
 
-    # 实例化 Encoder 和 Decoder
+    # Instantiate Encoder and Decoder
     encoder = FastRankEncoder(model, tokenizer, device, args)
     decoder = FastRankDecoder(model, tokenizer, device, args)
 
-    # 1. 运行编码 (返回处理过的原始 Tokens)
+    # 1. Run encoding (returns processed original tokens)
     original_processed_tokens = encoder.encode_file(args.input_file, args.compressed_file)
 
-    # 2. 运行解码 (返回解码后的 Tokens)
+    # 2. Run decoding (returns reconstructed token IDs)
     decoded_token_ids = decoder.decode_file(args.compressed_file, args.output_file)
 
-    # 3. 完整性验证
+    # 3. Lossless verification
     is_lossless = (original_processed_tokens == decoded_token_ids)
     print(f"\n" + "*" * 30)
-    print(f"无损验证: {'通过 (Lossless)' if is_lossless else '失败 (Mismatch)'}")
+    print(f"Lossless Verification: {'PASSED (Lossless)' if is_lossless else 'FAILED (Mismatch)'}")
     if not is_lossless:
-        print(f"长度对比: 原始 {len(original_processed_tokens)} vs 解码 {len(decoded_token_ids)}")
+        print(f"Length mismatch: Original {len(original_processed_tokens)} vs Decoded {len(decoded_token_ids)}")
     print("*" * 30)
 
 
