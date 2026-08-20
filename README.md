@@ -22,7 +22,10 @@ python Fast_Rank_Compression.py \
     --dtype "fp16" \
     --batch_size 256
 ```
-    
+
+### 3. Speculative compression (SDMC)
+
+
 
 ### 4. Medusa Compression
 
