@@ -2,11 +2,14 @@
 
 ## Environmental Setup
 
+Clone the repository:
+
 ```bash
-# Clone the repository
 git clone [https://github.com/your-username/your-repo-name.git](https://github.com/your-username/your-repo-name.git)
 cd your-repo-name
 ```
+
+Setup environment:
 
 ```bash
 conda env create -f environment.yml
