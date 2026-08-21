@@ -1,5 +1,18 @@
 # LLMzip-code
 
+## Environmental Setup
+
+```bash
+# Clone the repository
+git clone [https://github.com/your-username/your-repo-name.git](https://github.com/your-username/your-repo-name.git)
+cd your-repo-name
+```
+
+```bash
+conda env create -f environment.yml
+conda activate llm-dc
+```
+
 ## Data Preparation
 
 We evaluate our compression framework on both general text and source code benchmarks:
