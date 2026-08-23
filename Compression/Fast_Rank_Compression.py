@@ -357,7 +357,7 @@ def main():
     parser.add_argument("--lora_path", type=str, default=None, help="Path to LoRA fine-tuned weights (optional)")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size for processing")
     parser.add_argument("--context_length", type=int, default=1024, help="Maximum context length")
-    parser.add_argument("--window_length", type=int, default=512, help="Sliding window length")
+    parser.add_argument("--window_length", type=int, default=1024, help="Sliding window length")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input text file to compress")
     parser.add_argument("--compressed_file", type=str, default="rankcoding_compressed_data.txt", help="Path to save the compressed binary file")
     parser.add_argument("--output_file", type=str, default="rankcoding_decoded_text.txt", help="Path to save the reconstructed text file")
