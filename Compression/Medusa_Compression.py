@@ -563,7 +563,7 @@ def main():
                         help="Model precision: fp16 / fp32 / bf16")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size for processing.")
     parser.add_argument("--context_length", type=int, default=1024, help="Maximum context length.")
-    parser.add_argument("--window_length", type=int, default=512, help="Sliding window length.")
+    parser.add_argument("--window_length", type=int, default=1024, help="Sliding window length.")
     parser.add_argument("--num_active_heads", type=int, default=None,
                         help="Number of active Medusa heads (first n) to use during compression/decompression. "
                              "Defaults to all heads saved in the trained directory. "
