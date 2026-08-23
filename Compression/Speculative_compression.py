@@ -446,7 +446,7 @@ def main():
     parser.add_argument("--gamma", type=int, default=64, help="投机步长 N")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--context_length", type=int, default=1024)
-    parser.add_argument("--window_length", type=int, default=512)
+    parser.add_argument("--window_length", type=int, default=1024)
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--compressed_file", type=str, default="output.npz")
     parser.add_argument("--output_file", type=str, default="decoded_output.txt")
