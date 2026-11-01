@@ -1,26 +1,6 @@
 """
-MSMC + Arithmetic Coding（新 head 约定 + teacher-forced encode + round-merged decode）
+MSMC + Arithmetic Coding（domain head + teacher-forced encode + round-merged decode）
 =====================================================================================
-依赖：同目录下的 medusa_rank_compress.py（复用 head 定义、backbone 前向、KV 调度、
-batch-invariant 补丁、无损验证），以及 batch_invariant_attention.py（如果开 FP16 补丁）。
-
-与旧版 Medusa+AC 脚本相比：
-  1. 新 head 约定：每轮 n 个位置 = [backbone lm_head(+1), head0(+2), head1(+3), ...]；
-     --round_size 1 时就是“backbone + AC”（即 AC baseline 的同一套 coder）。
-  2. 调度与 Rank 版完全一致：encode 多轮一次性 teacher forcing，decode 每轮 1 次 backbone 调用。
-  3. 不再把整张 CDF [B, V+1]（~155MB/位置）搬到 CPU：
-       encode：GPU 上 gather 出每条流的 [low, high]，每个子批只搬一次 [items, B, 2]；
-       decode：CPU 算出每条流的 target value（B 个整数）→ GPU 上 searchsorted 找 symbol
-               → 只搬回 [B, 3]；解出的 token 直接留在 GPU 上。
-  4. 频率量化：freq = 1 + floor(p * (T - V))，余数加到 argmax，保证总和恰好为 T，
-     默认 T = 2^24（旧版 2^20 + clamp(min=1) 会让 152K 个最小频率吃掉 ~15% 概率质量）。
-  5. 压缩文件是二进制：一行 JSON 头 + 每条流 packbits 后的字节。
-  6. 统计：每个位置的理想 bits（-log2 p）、量化后 bits、实际 AC bits；
-     以及 CPU 端 AC 时间占比（--profile 时额外同步测 backbone 时间），用于 Amdahl 分析。
-
-数值一致性：AC 要求编解码两端的量化 CDF 逐位一致（比 Rank-Tier 只要求 top-32 排序一致更严格）。
-encode 端 head/lm_head 的输入形状是 [B, n_rounds, d]，decode 端是 [B, 1, d]，
-所以 FP16 下需要 --fixed_tile_attention --batch_invariant_linear；softmax 两边都在 [B, V] 上做。
 """
 
 import os
