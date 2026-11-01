@@ -70,11 +70,11 @@ python Training/train_Mhead_shared.py train \
     --val_num_files 5 --num_heads 5 --max_length 1024 --batch_size 4 --bf16 \
     --output_dir ./MSMC_heads
 ```
-@file is a text file with one path per line; globs and directories also work. Test files are removed from the training set automatically, and the script stops if test text overlaps the training data. The best checkpoint is written to ./MSMC_heads/best.
+`@file` is a text file with one path per line; globs and directories also work. Test files are removed from the training set automatically, and the script stops if test text overlaps the training data. The best checkpoint is written to `./MSMC_heads/best`.
 
 ## Compress and Decompress
 
---round_size n is the number of positions decoded per backbone call: n = 1 uses the backbone alone (no heads); n = k + 1 additionally uses the first k MSMC heads.
+`--round_size` n is the number of positions decoded per backbone call: n = 1 uses the backbone alone (no heads); n = k + 1 additionally uses the first k MSMC heads.
 
 ```bash
 COMMON="--model_name Qwen/Qwen2.5-0.5B-Instruct --medusa_heads_dir ./MSMC_heads/best \
@@ -102,6 +102,6 @@ cmp <file> d.txt && sha256sum <file> d.txt
 
 Important flags.
 
---batch_invariant_attention --batch_invariant_linear are required for lossless FP16 decoding with teacher-forced encoding. Without them, encoder and decoder logits can differ in the last bits.
+`--batch_invariant_attention` `--batch_invariant_linear` are required for lossless FP16 decoding with teacher-forced encoding. Without them, encoder and decoder logits can differ in the last bits.
 
---total_bits (AC only): probability quantization precision, default 2^24.
+`--total_bits` (AC only): probability quantization precision, default 2^24.
