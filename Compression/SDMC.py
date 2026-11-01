@@ -3,11 +3,113 @@ import time
 import queue
 import argparse
 import threading
+import contextlib
 import torch
 from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
 
+# 复用已经验证过的 batch-invariant kernel。这次不需要像 Medusa 那样做
+# "轮次对齐"的结构性改造——因为 batch invariant 的本意就是"不管这次调用
+# 一起处理多少个位置，同一个位置的结果都一样"，所以 encode（固定 gamma
+# 分块）和 decode（数据依赖的 S/L 连续段）这两种完全不对称的切分方式，
+# 只要 draft/target 两个模型都套上这套 kernel，就不需要互相对齐 shape。
+try:
+    from batch_invariant_attention import (
+        fp32_batch_invariant_attention_forward,
+        fixed_tile_attention_forward,
+        batch_invariant_linear_mode,
+    )
+    _HAS_BATCH_INVARIANT = True
+    _BATCH_INVARIANT_IMPORT_ERROR = None
+except ImportError as e:
+    _HAS_BATCH_INVARIANT = False
+    _BATCH_INVARIANT_IMPORT_ERROR = e
+
+
+DTYPE_MAP = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}
+
+
+def apply_precision_guards():
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction"):
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+    if hasattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction"):
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+
+
+def register_attention_patch(attn_fn, label):
+    """跟 fast_rank_compresssion.py / medusa 版本里的同名函数逻辑一致。
+    因为是替换 Qwen2Attention 这个类本身的方法（不是给某个模型实例打补丁），
+    draft_model 和 target_model 只要都是 Qwen2 架构，一次注册两个模型都生效。"""
+    patched_registry = False
+    try:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+        ALL_ATTENTION_FUNCTIONS["eager"] = attn_fn
+        patched_registry = True
+    except Exception as e:
+        print(f"[{label}] 通过 ALL_ATTENTION_FUNCTIONS 打补丁失败（可能是 transformers 版本较旧）：{e}")
+
+    try:
+        import transformers.models.qwen2.modeling_qwen2 as qwen2_module
+        if hasattr(qwen2_module, "eager_attention_forward"):
+            qwen2_module.eager_attention_forward = attn_fn
+            patched_registry = True
+    except Exception as e:
+        print(f"[{label}] 通过替换 modeling_qwen2.eager_attention_forward 打补丁失败：{e}")
+
+    patched_class = False
+    try:
+        import transformers.models.qwen2.modeling_qwen2 as qwen2_module
+        if not hasattr(qwen2_module, "eager_attention_forward"):
+            def _patched_qwen2_attention_forward(
+                self, hidden_states, attention_mask=None, position_ids=None,
+                past_key_value=None, output_attentions=False, use_cache=False,
+                cache_position=None, position_embeddings=None,
+            ):
+                bsz, q_len, _ = hidden_states.size()
+                query_states = self.q_proj(hidden_states)
+                key_states = self.k_proj(hidden_states)
+                value_states = self.v_proj(hidden_states)
+
+                query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+                key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+                value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+                if position_embeddings is None:
+                    cos, sin = self.rotary_emb(value_states, position_ids)
+                else:
+                    cos, sin = position_embeddings
+                query_states, key_states = qwen2_module.apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+                if past_key_value is not None:
+                    cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, self.layer_idx, cache_kwargs
+                    )
+
+                scale = 1.0 / (self.head_dim ** 0.5)
+                attn_output, attn_weights = attn_fn(
+                    self, query_states, key_states, value_states, attention_mask, scale,
+                    dropout=(self.attention_dropout if self.training else 0.0),
+                )
+                attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+                attn_output = self.o_proj(attn_output)
+
+                if not output_attentions:
+                    attn_weights = None
+                return attn_output, attn_weights, past_key_value
+
+            qwen2_module.Qwen2Attention.forward = _patched_qwen2_attention_forward
+            patched_class = True
+    except Exception as e:
+        print(f"[{label}] 通过整体替换 Qwen2Attention.forward 打补丁失败：{e}")
+
+    if not (patched_registry or patched_class):
+        raise RuntimeError(f"{label} 补丁未能生效，所有打补丁方式都失败了，请检查 transformers 版本")
+    print(f"[{label}] 已启用（同时覆盖 draft/target 两个模型）" +
+          ("（整体替换 Qwen2Attention.forward）" if patched_class else "（通过注册表/模块函数）"))
 
 
 def slice_kv_cache(past_key_values, window_length):
@@ -15,11 +117,18 @@ def slice_kv_cache(past_key_values, window_length):
     if past_key_values is None:
         return None
     if isinstance(past_key_values, DynamicCache):
-        # 使用内置 crop 方法，保证 _seen_tokens 同步
         past_key_values.crop(window_length)
         return past_key_values
     else:
         return tuple((k[..., -window_length:, :], v[..., -window_length:, :]) for k, v in past_key_values)
+
+
+def get_kv_cache_length(past_key_values):
+    if past_key_values is None:
+        return 0
+    if hasattr(past_key_values, "get_seq_length"):
+        return past_key_values.get_seq_length()
+    return past_key_values[0][0].size(2)
 
 
 def get_ranks_and_bins_fast(logits, target_tokens):
@@ -30,21 +139,14 @@ def get_ranks_and_bins_fast(logits, target_tokens):
     if logits.dtype != torch.float32:
         logits = logits.float()
 
-    # topk_indices: [..., 32]
     topk_vals, topk_indices = torch.topk(logits, k=32, dim=-1)
-
-    # 将 targets 扩展以匹配 topk 的最后一个维度: [..., 1]
     expanded_targets = target_tokens.unsqueeze(-1)
     matches = (topk_indices == expanded_targets)
 
-    # 找到是否存在匹配，以及匹配的索引
     found = matches.any(dim=-1)
     rank_indices = matches.int().argmax(dim=-1)
-
-    # 计算 Rank (1-based)，找不到的给 33
     ranks = torch.where(found, rank_indices + 1, torch.tensor(33, device=logits.device))
 
-    # 向量化计算 bins
     bins = torch.full_like(target_tokens, 4)
     bins = torch.where(found & (ranks == 1), 1, bins)
     bins = torch.where(found & (ranks >= 2) & (ranks <= 4), 2, bins)
@@ -63,7 +165,7 @@ class FastRankEncoder:
         self.tokenizer = tokenizer
         self.device = device
         self.args = args
-        self.write_queue = queue.Queue(maxsize=500)  # 调大队列，防止向量化提速后阻塞
+        self.write_queue = queue.Queue(maxsize=500)
         self.final_counts = {1: 0, 2: 0, 3: 0, 4: 0}
         self.model_usage = {'S': 0, 'L': 0}
 
@@ -74,26 +176,22 @@ class FastRankEncoder:
 
             while True:
                 item = self.write_queue.get()
-                if item is None: break
+                if item is None:
+                    break
 
                 d_ranks_cpu, d_bins_cpu, t_ranks_cpu, t_bins_cpu, targets_cpu = item
                 step_data = []
 
                 for b in range(batch_size):
-                    # 1. 新判定逻辑：小模型 Rank=1 则命中，否则由大模型接管
                     if d_ranks_cpu[b] == 1:
                         self.model_usage['S'] += 1
-                        # 小模型命中，仅存 1-bit 标志位 "1"
                         step_data.append("1")
                     else:
                         self.model_usage['L'] += 1
                         idx = t_bins_cpu[b]
                         r = t_ranks_cpu[b]
-
-                        # 仅统计大模型的 bin 分布，用于计算实际开销
                         self.final_counts[idx] += 1
 
-                        # 大模型根据 bin 存具体的额外信息
                         if idx == 1:
                             val = 0
                         elif idx == 4:
@@ -101,14 +199,13 @@ class FastRankEncoder:
                         else:
                             val = int(r)
 
-                        # 大模型存储：前缀 0 + bin + rank/ID
                         step_data.append(f"0,{idx},{val}")
 
                 f.write(" ".join(step_data) + "\n")
                 self.write_queue.task_done()
 
     def encode_file(self, input_file_path, output_compressed_path):
-        print(f"\n--- Starting Speculative Encoding (Context Synchronized) ---")
+        print(f"\n--- Starting Speculative Encoding (batch-invariant kernel, {self.args.dtype}) ---")
         with open(input_file_path, 'r', encoding='utf-8') as f:
             text = f.read()
 
@@ -136,24 +233,19 @@ class FastRankEncoder:
             while step < chunk_length - 1:
                 cur_gamma = min(self.args.gamma, chunk_length - 1 - step)
 
-                # ==========================================
-                # 1. 块级别上下文对齐
-                # ==========================================
+                # ---- 块级别上下文对齐 ----
                 if draft_past is not None:
-                    curr_len = draft_past.get_seq_length() if hasattr(draft_past, "get_seq_length") else draft_past[0][
-                        0].size(2)
+                    curr_len = get_kv_cache_length(draft_past)
                     if curr_len >= MAX_L:
                         draft_past = slice_kv_cache(draft_past, W)
                         target_past = slice_kv_cache(target_past, W)
 
-                # ==========================================
-                # 2. 大模型 Block Forward
-                # ==========================================
                 input_seq = batches[:, step: step + cur_gamma]
                 pos_ids_block = torch.arange(
                     step, step + cur_gamma, dtype=torch.long, device=self.device
                 ).unsqueeze(0).expand(self.args.batch_size, -1)
 
+                # ---- Target model：一次并行 teacher-forcing 处理整块 ----
                 t_out = self.target_model(
                     input_ids=input_seq,
                     past_key_values=target_past,
@@ -163,45 +255,20 @@ class FastRankEncoder:
                 target_logits = t_out.logits
                 target_past = t_out.past_key_values
 
-                # 逐 token forward模式
-                # target_logits_list = []
-                # for i in range(cur_gamma):
-                #     curr_input = batches[:, step + i].unsqueeze(1)
-                #     current_pos_id = torch.tensor([[step + i]] * self.args.batch_size, device=self.device)
-                #
-                #     t_out = self.target_model(
-                #         input_ids=curr_input,
-                #         past_key_values=target_past,
-                #         position_ids=current_pos_id,
-                #         use_cache=True
-                #     )
-                #     target_logits_list.append(t_out.logits)
-                #     target_past = t_out.past_key_values
-                # target_logits = torch.cat(target_logits_list, dim=1)
+                # ---- Draft model：改成跟 target 一样的一次并行调用 ----
+                # 原来是 for 循环逐 token 算，现在有了真正 batch-invariant
+                # 的 kernel 兜底，不需要跟 decode 端的 shape 对齐，直接
+                # 照抄 target 的写法即可，白得一次加速。
+                d_out = self.draft_model(
+                    input_ids=input_seq,
+                    past_key_values=draft_past,
+                    position_ids=pos_ids_block,
+                    use_cache=True
+                )
+                draft_logits = d_out.logits
+                draft_past = d_out.past_key_values
 
-                # ==========================================
-                # 3. 小模型单步 Forward 循环
-                # ==========================================
-                draft_logits_list = []
-                for i in range(cur_gamma):
-                    curr_input = batches[:, step + i].unsqueeze(1)
-                    current_pos_id = torch.tensor([[step + i]] * self.args.batch_size,
-                                                  dtype=torch.long, device=self.device)
-
-                    d_out = self.draft_model(
-                        input_ids=curr_input,
-                        past_key_values=draft_past,
-                        position_ids=current_pos_id,
-                        use_cache=True
-                    )
-                    draft_logits_list.append(d_out.logits)
-                    draft_past = d_out.past_key_values
-
-                draft_logits = torch.cat(draft_logits_list, dim=1)
-
-                # ==========================================
-                # 4. 向量化计算 Rank 并分发
-                # ==========================================
+                # ---- 向量化计算 Rank 并分发 ----
                 t_toks_seq = batches[:, step + 1: step + 1 + cur_gamma]
                 d_ranks_seq, d_bins_seq = get_ranks_and_bins_fast(draft_logits, t_toks_seq)
                 t_ranks_seq, t_bins_seq = get_ranks_and_bins_fast(target_logits, t_toks_seq)
@@ -229,20 +296,14 @@ class FastRankEncoder:
         original_bits = len(actual_text.encode('utf-8')) * 8
         c = self.final_counts
         m = self.model_usage
-        total_tokens = sum(m.values())  # 总 Token 数量现在是 S 和 L 的总和
+        total_tokens = sum(m.values())
 
-        # ==========================================
-        # 严格计算新方案的预期 Bit 数
-        # ==========================================
-        # 1. 小模型命中区：每个 token 严格 1 bit
-        # 2. 大模型未命中区：前缀位 (1 bit) + Bin 标签 (2 bits) = 3 bits
-        #    加上各个 Bin 额外的 Rank / ID 存储开销
         expected_bits = (
-                m['S'] * 1 +  # 小模型: "1"
-                m['L'] * (1 + 2) +  # 大模型基底开销: 前缀 "0" + 2 bits Bin标签
-                c[2] * 2 +  # 大模型 Bin 2: 额外 2 bits rank
-                c[3] * 5 +  # 大模型 Bin 3: 额外 5 bits rank
-                c[4] * 18  # 大模型 Bin 4: 额外 18 bits TokenID
+                m['S'] * 1 +
+                m['L'] * (1 + 2) +
+                c[2] * 2 +
+                c[3] * 5 +
+                c[4] * 18
         )
 
         print(f"\n\n" + "=" * 40)
@@ -254,16 +315,20 @@ class FastRankEncoder:
         print(f"2<=rank<=4: {c[2] / m['L']:.2%}")
         print(f"5<=rank<=32: {c[3] / m['L']:.2%}")
         print(f"rank>32: {c[4] / m['L']:.2%}")
-
         print(f"-" * 40)
         print(f"   理论压缩率: {original_bits / expected_bits:>10.4f}x")
         print(f"   平均Bit/Token: {expected_bits / total_tokens:>10.4f} bits")
         print(f"=" * 40)
 
 
-
 # ==========================================
-# 解码器类 (Speculative Decoder BS=1) - Refactored
+# 解码器类 (Speculative Decoder BS=1)
+#
+# 不需要改动：draft 在 S run 里自己生成自己（天然顺序依赖，无法并行），
+# target 在 L run 里自己生成自己，也是同理——这两段是真正意义上"不可能
+# 消除"的顺序依赖，跟 Rank Coding 的 decode 是同一类限制。sync 环节
+# 已经是单次合并调用，没有能再合并的空间（不像 Medusa 那样有两次
+# 冗余调用可以合并）。
 # ==========================================
 class FastRankDecoder:
     def __init__(self, draft_model, target_model, tokenizer, device, args):
@@ -274,12 +339,6 @@ class FastRankDecoder:
         self.args = args
 
     def _parse_all_instructions(self, instructions):
-        """
-        [优化 1] 全局预解析：一次性把所有指令转换为机器友好的格式，消除推理时的字符串处理。
-        返回格式: list of (run_type, parsed_data_list)
-        - S 模式: parsed_data_list 只有长度信息 (不需要解析指令)
-        - L 模式: parsed_data_list 存储 [(idx, val), ...] 整数元组
-        """
         if not instructions:
             return []
 
@@ -297,7 +356,7 @@ class FastRankDecoder:
                     runs.append((curr_type, curr_run))
                     curr_type = "S"
                     curr_run = [None]
-            else:  # inst_type == "L"
+            else:
                 parts = inst.split(',')
                 parsed_inst = (int(parts[1]), int(parts[2]))
                 if curr_type == "L":
@@ -318,18 +377,12 @@ class FastRankDecoder:
         batch_size, chunk_length, window_length = map(int, header)
         first_token = int(lines[1].strip().split()[target_batch_idx])
 
-        # 提取当前 Batch 的指令列表
         instructions = [line.strip().split()[target_batch_idx] for line in lines[2:] if line.strip()]
-
-        # [优化 2] 取消 gamma 分组，直接获取全局的 runs
-        # 这将极大增加连续 S 模式或 L 模式的 K 值，从而最大化平摊同步开销
         runs = self._parse_all_instructions(instructions)
 
-        # [优化 3] 预分配连续显存，消灭 Python List 频繁 `.append()` 和 `torch.tensor()` 的开销
         decoded_ids = torch.zeros((1, chunk_length), dtype=torch.long, device=self.device)
         decoded_ids[0, 0] = first_token
 
-        # 预生成全局的 position_ids，供后续通过切片零成本获取
         global_positions = torch.arange(chunk_length, device=self.device).unsqueeze(0)
 
         draft_past = None
@@ -344,37 +397,27 @@ class FastRankDecoder:
             for run_type, run_data in runs:
                 K = len(run_data)
 
-                # KV Cache 裁剪 (基于 O(1) 的 shape 检查，无同步开销)
-                if draft_past is not None and draft_past[0][0].size(2) >= MAX_L:
+                if draft_past is not None and get_kv_cache_length(draft_past) >= MAX_L:
                     draft_past = slice_kv_cache(draft_past, W)
-                if target_past is not None and target_past[0][0].size(2) >= MAX_L:
+                if target_past is not None and get_kv_cache_length(target_past) >= MAX_L:
                     target_past = slice_kv_cache(target_past, W)
 
                 if run_type == "S":
-                    # --- 小模型自回归生成 ---
-                    # 直接从 pre-allocated tensor 中切片出输入，无需重新建 tensor
                     curr_input = decoded_ids[:, step: step + 1]
 
                     for k in range(K):
                         curr_pos = global_positions[:, step + k: step + k + 1]
-
                         d_out = self.draft_model(
                             input_ids=curr_input, past_key_values=draft_past,
                             position_ids=curr_pos, use_cache=True
                         )
                         draft_past = d_out.past_key_values
-
-                        # 保持张量形态！不要使用 .item() 强行同步到 CPU
                         next_token = torch.argmax(d_out.logits[0, -1, :])
-
                         decoded_ids[0, step + k + 1] = next_token
-                        curr_input = next_token.view(1, 1)  # 喂给下一步
+                        curr_input = next_token.view(1, 1)
 
-                    # --- 大模型同步 (Prefill) ---
-                    # 一次性将这段时间累积的 token 送入大模型同步 KV Cache
                     sync_input = decoded_ids[:, step: step + K]
                     sync_pos = global_positions[:, step: step + K]
-
                     t_out = self.target_model(
                         input_ids=sync_input, past_key_values=target_past,
                         position_ids=sync_pos, use_cache=True
@@ -382,12 +425,10 @@ class FastRankDecoder:
                     target_past = t_out.past_key_values
 
                 else:  # run_type == "L"
-                    # --- 大模型自回归生成 ---
                     curr_input = decoded_ids[:, step: step + 1]
 
                     for k in range(K):
                         curr_pos = global_positions[:, step + k: step + k + 1]
-
                         t_out = self.target_model(
                             input_ids=curr_input, past_key_values=target_past,
                             position_ids=curr_pos, use_cache=True
@@ -395,25 +436,21 @@ class FastRankDecoder:
                         target_past = t_out.past_key_values
 
                         logits = t_out.logits[0, -1, :]
-                        idx, val = run_data[k]  # 预先解析好的指令，直接提取整数
+                        idx, val = run_data[k]
 
                         if idx == 1:
                             next_token = torch.argmax(logits)
                         elif idx in [2, 3]:
-                            # 仅在 GPU 上计算 TopK
                             topk_indices = torch.topk(logits, k=32).indices
                             next_token = topk_indices[val - 1]
-                        else:  # idx == 4
-                            # 将数字转为张量以保持在 GPU 上写入
+                        else:
                             next_token = torch.tensor(val, device=self.device)
 
                         decoded_ids[0, step + k + 1] = next_token
                         curr_input = next_token.view(1, 1)
 
-                    # --- 小模型同步 (Prefill) ---
                     sync_input = decoded_ids[:, step: step + K]
                     sync_pos = global_positions[:, step: step + K]
-
                     d_out = self.draft_model(
                         input_ids=sync_input, past_key_values=draft_past,
                         position_ids=sync_pos, use_cache=True
@@ -442,56 +479,74 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--draft_model_name", type=str, default="Qwen/Qwen1.5-0.5B")
     parser.add_argument("--target_model_name", type=str, default="Qwen/Qwen1.5-7B")
-    parser.add_argument("--lora_path", type=str)
     parser.add_argument("--gamma", type=int, default=64, help="投机步长 N")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--context_length", type=int, default=1024)
-    parser.add_argument("--window_length", type=int, default=1024)
+    parser.add_argument("--window_length", type=int, default=512)
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--compressed_file", type=str, default="output.npz")
     parser.add_argument("--output_file", type=str, default="decoded_output.txt")
+    parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"])
+    parser.add_argument("--attn_implementation", type=str, default="eager",
+                         choices=["eager", "sdpa", "flash_attention_2"])
+    parser.add_argument("--batch_invariant_attention", action="store_true")
+    parser.add_argument("--fixed_tile_attention", action="store_true")
+    parser.add_argument("--batch_invariant_linear", action="store_true")
     args = parser.parse_args()
 
+    if (args.batch_invariant_attention or args.fixed_tile_attention or args.batch_invariant_linear) \
+            and not _HAS_BATCH_INVARIANT:
+        raise ImportError(
+            f"未能导入 batch_invariant_attention.py：{_BATCH_INVARIANT_IMPORT_ERROR!r}\n"
+            "确认该文件跟本脚本放在同一目录下。"
+        )
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = DTYPE_MAP[args.dtype]
+
+    apply_precision_guards()
+    # 只需要注册一次：Qwen2Attention.forward 是类级别的替换，
+    # draft_model 和 target_model 只要都是 Qwen2 架构，会同时生效。
+    if args.fixed_tile_attention:
+        register_attention_patch(fixed_tile_attention_forward, "fixed_tile_attention")
+    elif args.batch_invariant_attention:
+        register_attention_patch(fp32_batch_invariant_attention_forward, "batch_invariant_attention")
+
     print(f"Loading Draft Model: {args.draft_model_name} ...")
-    draft_model = AutoModelForCausalLM.from_pretrained(args.draft_model_name, torch_dtype=torch.float32,
-                                                       device_map=device).eval()
+    draft_model = AutoModelForCausalLM.from_pretrained(
+        args.draft_model_name, torch_dtype=dtype, device_map=device,
+        attn_implementation=args.attn_implementation,
+    ).eval()
 
     lora_model_path = ("/root/yanzhe/yanzhe/FineZip-main/finezip/finetuned_models/"
                        "h100/Qwen0.5b/wiki_05_newloss_128_r16")
-    # Lora权重,不用的时候记得注释掉
-    draft_model = PeftModel.from_pretrained(draft_model, lora_model_path, torch_dtype=torch.float32)
-    draft_model = draft_model.merge_and_unload()
-
+    # Lora权重,不用的时候记得注释掉下两行
+    # draft_model = PeftModel.from_pretrained(draft_model, lora_model_path, torch_dtype=dtype)
+    # draft_model = draft_model.merge_and_unload()
 
     print(f"Loading Target Model: {args.target_model_name} ...")
-    target_model = AutoModelForCausalLM.from_pretrained(args.target_model_name, torch_dtype=torch.float32,
-                                                        device_map=device).eval()
+    target_model = AutoModelForCausalLM.from_pretrained(
+        args.target_model_name, torch_dtype=dtype, device_map=device,
+        attn_implementation=args.attn_implementation,
+    ).eval()
     tokenizer = AutoTokenizer.from_pretrained(args.draft_model_name)
 
     encoder = FastRankEncoder(draft_model, target_model, tokenizer, device, args)
-
-    # Decoder 初始化时传入 args，以便获取 context_length
     decoder = FastRankDecoder(draft_model, target_model, tokenizer, device, args)
 
-    # 1. 执行全量 Encode
-    all_original_tokens = list(encoder.encode_file(args.input_file, args.compressed_file))
+    linear_ctx = batch_invariant_linear_mode() if args.batch_invariant_linear else contextlib.nullcontext()
+    with linear_ctx:
+        all_original_tokens = list(encoder.encode_file(args.input_file, args.compressed_file))
+        chunk_length = len(all_original_tokens) // args.batch_size
+        original_batch_0 = all_original_tokens[:chunk_length]
+        decoded_batch_0 = list(decoder.decode_file(args.compressed_file, target_batch_idx=0))
 
-    # 由于原文被按 batch_size 切成了多个相互独立的段 (BS=16, ChunkLength=L)
-    # 我们需要截取 Batch 0 的原始数据用来对比 (也就是前 chunk_length 个 token)
-    chunk_length = len(all_original_tokens) // args.batch_size
-    original_batch_0 = all_original_tokens[:chunk_length]
-
-    # 2. 执行解码：指定只还原 Batch 0 (BS=1)
-    decoded_batch_0 = list(decoder.decode_file(args.compressed_file, target_batch_idx=0))
     decoded_text = tokenizer.decode(decoded_batch_0, skip_special_tokens=True)
     with open(args.output_file, 'w', encoding='utf-8') as f_out:
         f_out.write(decoded_text)
     print(f"\n解码文本已写入: {args.output_file}")
 
-    # 3. 对比无损性
     is_lossless = (original_batch_0 == decoded_batch_0)
-
     print(f"\n" + "*" * 40)
     print(f"无损验证 (Target Batch=0): {'通过 (Lossless)' if is_lossless else '失败 (Mismatch)'}")
     if not is_lossless:
@@ -502,6 +557,7 @@ def main():
                 print(f"解码 TokenID: {decoded_batch_0[i]}")
                 break
     print("*" * 40)
+
 
 if __name__ == "__main__":
     main()
