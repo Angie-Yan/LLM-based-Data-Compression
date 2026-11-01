@@ -1,6 +1,7 @@
 # The Invocation Bottleneck in LLM-Based Lossless Compression: What Can Be Removed and What Must Be Traded
 Code for the paper The Invocation Bottleneck in LLM-Based Lossless Compression: What Can Be Removed and What Must Be Traded. This repository contains a GPU-resident LLM compression pipeline with two entropy coders (arithmetic coding and Rank-Tier coding), batch-invariant kernels that make FP16 encoding and decoding bit-exact, MSMC (multi-head single-model compression), and SDMC (speculative dual-model compression).
 
+
 ## Environmental Setup
 
 Clone the repository:
@@ -17,6 +18,7 @@ conda env create -f environment.yml
 conda activate llm-dc
 ```
 
+
 ## Data Preparation
 
 We evaluate our compression framework on both general text and source code benchmarks:
@@ -27,37 +29,42 @@ For text compression, we use the preprocessed **Simple English Wikipedia** datas
 
 ### Source Code
 
-Built from RocksDB C/C++ sources plus a small share of MBPP Python. Test files are drawn from RocksDB top-level directories that are held out entirely; PyTorch C++ headers are used as additional training-only data. We do not redistribute the corpus: it is rebuilt from public sources with Scripts/Code_data_Collection.py, which needs three inputs:
+Built from RocksDB C/C++ sources plus a small share of Python from MBPP and HumanEval. Test files are drawn from RocksDB top-level directories that are held out entirely; PyTorch C++ headers are used as additional training-only data. We do not redistribute the corpus: it is rebuilt from public sources with `Scripts/Code_data_Collection.py`.
 
 1. RocksDB at a fixed commit (a plain clone is enough; RocksDB does not need to be built):
 
-```bash
-git clone https://github.com/facebook/rocksdb.git
-git -C rocksdb checkout ac412b10955d5a1d3d99aff8edf94eae1e4a22d5
-```
+ ```bash
+ git clone https://github.com/facebook/rocksdb.git
+   git -C rocksdb checkout ac412b10955d5a1d3d99aff8edf94eae1e4a22d5   # RocksDB does not need to be built
+   wget -O mbpp.jsonl \
+     https://raw.githubusercontent.com/google-research/google-research/master/mbpp/mbpp.jsonl
+   wget -O HumanEval.jsonl.gz \
+     https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz
+   ```
+2. Rebuild the exact paper split from the released manifest:
 
-2. MBPP, loaded with Hugging Face datasets (mbpp). Without network access, pass a local copy with --mbpp_path mbpp.jsonl (.jsonl, .json or .parquet).
+   ```bash
+   python Scripts/Code_data_Collection.py --rocksdb_dir rocksdb \
+       --mbpp_path mbpp.jsonl --humaneval_path HumanEval.jsonl.gz \
+       --from_manifest Scripts/splits/code_manifest.json \
+       --extra_train_dirs $CONDA_PREFIX/lib/python3.10/site-packages/torch/include \
+       --out_dir data/code_corpus
+   ```
 
-3. PyTorch C++ headers from the environment in environment.yml (torch <version>). They are used for training data only; a different torch version changes the training data, not the test set.
+   The manifest lists, in order, the source files, MBPP tasks and HumanEval tasks that make up
+   each test sample, together with the SHA-256 of each sample. The script prints `OK` for every
+   test sample it reproduces byte for byte, and warns if the RocksDB commit differs.
 
-Rebuild the exact paper split from the released manifest:
+To build a new split instead (e.g. with another seed), omit `--from_manifest`:
 
 ```bash
 python Scripts/Code_data_Collection.py --rocksdb_dir rocksdb \
-    --from_manifest Scripts/splits/code_manifest.json \
+    --mbpp_path mbpp.jsonl --humaneval_path HumanEval.jsonl.gz \
+    --split_by dir --seed 0 \
     --extra_train_dirs $CONDA_PREFIX/lib/python3.10/site-packages/torch/include \
     --out_dir data/code_corpus
 ```
 
-The manifest lists, in order, the source files and MBPP tasks that make up each test sample, and the SHA-256 of each sample. The script prints OK for every test sample it reproduces byte for byte, and warns if the RocksDB commit differs.
-
-Build a new split (e.g. with another seed) by omitting --from_manifest:
-
-```bash
-python Scripts/Code_data_Collection.py --rocksdb_dir rocksdb --out_dir data/code_corpus \
-    --no_humaneval --split_by dir --seed 0 \
-    --extra_train_dirs $CONDA_PREFIX/lib/python3.10/site-packages/torch/include
-```
 
 ## Pretrained MSMC Heads
 
