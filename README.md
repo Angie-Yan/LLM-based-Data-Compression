@@ -25,12 +25,11 @@ We evaluate our compression framework on both general text and source code bench
 For text compression, we use the preprocessed **Simple English Wikipedia** dataset (Version 2) available on Kaggle:
 - **Download:** [Plain-text Wikipedia SimpleEnglish (Kaggle)](https://www.kaggle.com/datasets/ffatty/plain-text-wikipedia-simpleenglish/versions/2)
 
-### Code Dataset
+### Source Code
 
-Built from RocksDB C/C++ sources plus a small share of MBPP Python. Test files are drawn from RocksDB top-level directories that are held out entirely; PyTorch C++ headers are used as additional training-only data. We do not redistribute the corpus: it is rebuilt from public sources with Scripts/build_code_corpus.py, which needs three inputs:
-For code compression, we provide a zero-configuration script to automatically download and construct a 1MB mixed multi-language code dataset (sampling from MBPP, HumanEval, HumanEval-X, and C++ repositories). Simply run:
+Built from RocksDB C/C++ sources plus a small share of MBPP Python. Test files are drawn from RocksDB top-level directories that are held out entirely; PyTorch C++ headers are used as additional training-only data. We do not redistribute the corpus: it is rebuilt from public sources with Scripts/Code_data_Collection.py, which needs three inputs:
 
-1. RocksDB (a plain clone is enough; RocksDB does not need to be built):
+1. RocksDB at a fixed commit (a plain clone is enough; RocksDB does not need to be built):
 
 ```bash
 git clone https://github.com/facebook/rocksdb.git
@@ -55,7 +54,7 @@ The manifest lists, in order, the source files and MBPP tasks that make up each 
 Build a new split (e.g. with another seed) by omitting --from_manifest:
 
 ```bash
-python Scripts/build_code_corpus.py --rocksdb_dir rocksdb --out_dir data/code_corpus \
+python Scripts/Code_data_Collection.py --rocksdb_dir rocksdb --out_dir data/code_corpus \
     --no_humaneval --split_by dir --seed 0 \
     --extra_train_dirs $CONDA_PREFIX/lib/python3.10/site-packages/torch/include
 ```
@@ -67,36 +66,38 @@ One head set (K = 5 heads, FP16, ~1.4 GB) per domain, to train them yourself:
 ```bash
 python Training/train_Mhead_shared.py train \
     --model_name Qwen/Qwen2.5-0.5B-Instruct \
-    --train_files @data/<your_train_dataset_path> --test_files @data/<your_test_dataset_path> \
+    --train_files @train_list.txt --test_files @test_list.txt \
     --val_num_files 5 --num_heads 5 --max_length 1024 --batch_size 4 --bf16 \
     --output_dir ./MSMC_heads
 ```
+@file is a text file with one path per line; globs and directories also work. Test files are removed from the training set automatically, and the script stops if test text overlaps the training data. The best checkpoint is written to ./MSMC_heads/best.
 
 ## Compress and Decompress
 
 --round_size n is the number of positions decoded per backbone call: n = 1 uses the backbone alone (no heads); n = k + 1 additionally uses the first k MSMC heads.
 
 ```bash
-COMMON="--model_name Qwen/Qwen2.5-0.5B-Instruct --medusa_heads_dir ./MSMC_heads \
+COMMON="--model_name Qwen/Qwen2.5-0.5B-Instruct --medusa_heads_dir ./MSMC_heads/best \
   --dtype fp16 --attn_implementation eager --batch_invariant_attention --batch_invariant_linear \
-  --batch_size 256 --round_size 4"
+  --batch_size 256 --round_size 2"
 
-# MSMC + AC: encode and decode in one process, then verify byte-exact reconstruction
+# MSMC + AC: encode, decode and verify byte-exact reconstruction in one process
 python Compression/MSMC_AC.py $COMMON \
-    --input_file data/<your_dataset_path> --compressed_file compressed_ac.bin --output_file decoded_ac.txt
+    --input_file <file> --compressed_file compressed_ac.bin --output_file decoded_ac.txt
 
-# MSMC + RC
-python Compression/Medusa_Compression.py $COMMON \
-    --input_file data/<your_dataset_path> --compressed_file compressed_rc.txt --output_file decoded_rc.txt
+# MSMC + RC (also writes compressed_rc.txt.tail, the raw bytes after the last full batch;
+# keep it next to the compressed file)
+python Compression/<RC script>.py $COMMON \
+    --input_file <file> --compressed_file compressed_rc.txt --output_file decoded_rc.txt
 ```
 
 Separate-process decoding. Encoding and decoding can run in different processes; the decoder reloads the backbone and heads and reads only the compressed file:
 
 ```bash
-python Compression/MSMC_AC.py $COMMON --mode encode --input_file F --compressed_file c.bin
+python Compression/MSMC_AC.py $COMMON --mode encode --input_file <file> --compressed_file c.bin
 python Compression/MSMC_AC.py $COMMON --mode decode --compressed_file c.bin \
-    --output_file d.txt --input_file F          # --input_file is used only for verification
-cmp F d.txt && sha256sum F d.txt
+    --output_file d.txt --input_file <file>     # --input_file is used only for verification
+cmp <file> d.txt && sha256sum <file> d.txt
 ```
 
 Important flags.
