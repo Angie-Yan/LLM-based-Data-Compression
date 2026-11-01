@@ -1,24 +1,3 @@
-"""
-构建 Code 语料：先按“来源单元”划分 train / test，再分别生成测试样本和训练分片。
-保证测试样本里的任何代码都没有出现在训练集中，且测试样本内部不重复（无放回抽样）。
-
-划分单元：
-  RocksDB   —— 按文件（默认）或按目录（--split_by dir，更严格）
-  MBPP      —— 按 task_id
-  HumanEval —— 按 task_id
-  另外按内容 sha256 去重，重复内容只会落在同一侧。
-
-输出（--out_dir）：
-  test/code_00 … code_09     10 个 ~1MB 测试样本（只来自 test 侧）
-  train/train_000 …          ~1MB 训练分片（只来自 train 侧），可直接喂给 train_medusa_domain.py
-  train_list.txt / test_list.txt
-  manifest.json              每个来源单元被分到哪一侧、RocksDB commit、各类统计（写论文/复现用）
-
-用法：
-  python build_code_corpus.py --rocksdb_dir /path/to/rocksdb --out_dir /root/yanzhe/archive/code_corpus
-  # MBPP / HumanEval 默认从 HuggingFace datasets 读取；离线时用 --mbpp_path / --humaneval_path 指向本地 jsonl/parquet
-"""
-
 import os
 import io
 import json
@@ -37,14 +16,14 @@ def sha(b):
 
 
 # ------------------------------------------------------------
-# 读取来源
+# Read Source
 # ------------------------------------------------------------
 
 def collect_rocksdb(root, exts, exclude_dirs, min_bytes, max_bytes):
     units, skipped = [], {"ext": 0, "size": 0, "non_utf8": 0}
     for dp, dns, fns in os.walk(root):
-        dns[:] = [d for d in dns if d not in exclude_dirs]
-        for fn in fns:
+        dns[:] = sorted(d for d in dns if d not in exclude_dirs)   # 排序：结果与文件系统的遍历顺序无关
+        for fn in sorted(fns):
             p = os.path.join(dp, fn)
             if os.path.splitext(fn)[1].lower() not in exts:
                 skipped["ext"] += 1
@@ -59,8 +38,9 @@ def collect_rocksdb(root, exts, exclude_dirs, min_bytes, max_bytes):
                 skipped["non_utf8"] += 1
                 continue
             rel = os.path.relpath(p, root)
-            units.append({"source": "rocksdb", "id": rel, "dir": rel.split(os.sep)[0],
-                          "bytes": b})
+            units.append({"source": "rocksdb", "id": rel.replace(os.sep, "/"),
+                          "dir": rel.split(os.sep)[0], "bytes": b})
+    units.sort(key=lambda u: u["id"])
     return units, skipped
 
 
@@ -218,6 +198,86 @@ def write_shards(units, out_dir, prefix, shard_size, rng):
 
 
 # ------------------------------------------------------------
+# From manifest Rebuilt（同一 RocksDB commit + MBPP → 逐字节相同的测试样本）
+# ------------------------------------------------------------
+
+def rebuild_from_manifest(args):
+    man = json.load(open(args.from_manifest))
+    margs = man["args"]
+    exts, excl = set(margs["exts"]), set(margs["exclude_dirs"])
+    try:
+        commit = subprocess.check_output(["git", "-C", args.rocksdb_dir, "rev-parse", "HEAD"],
+                                         stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        commit = None
+    if man.get("rocksdb_commit") and commit != man["rocksdb_commit"]:
+        print(f"[Warn] RocksDB commit 不一致：manifest={man['rocksdb_commit']}，本地={commit}。"
+              f"请先 git checkout {man['rocksdb_commit']}")
+
+    pool = {}
+    for u in collect_rocksdb(args.rocksdb_dir, exts, excl, margs["min_bytes"], margs["max_bytes"])[0]:
+        pool[u["id"]] = u
+    py_ids = [str(i) for i in man.get("python_train", []) + man.get("python_test", [])]
+    py_ids += [str(i) for ms in man["test_samples"].values() for i in ms
+               if str(i).startswith(("mbpp/", "HumanEval/"))]
+    if any(i.startswith("mbpp/") for i in py_ids):
+        for u in collect_mbpp(args.mbpp_path):
+            pool[str(u["id"])] = u
+    if any(i.startswith("HumanEval/") for i in py_ids):     # 论文的数据里含 HumanEval
+        try:
+            for u in collect_humaneval(args.humaneval_path):
+                pool[str(u["id"])] = u
+        except Exception as e:
+            print(f"[Warn] 读取 HumanEval 失败（{type(e).__name__}）：manifest 需要 HumanEval，"
+                  f"请用 --humaneval_path 指向 HumanEval.jsonl(.gz)")
+    for d in args.extra_train_dirs:
+        src = "extra:" + os.path.basename(os.path.normpath(d))
+        for u in collect_rocksdb(d, exts, excl, margs["min_bytes"], margs["max_bytes"])[0]:
+            pool[src + "/" + u["id"]] = u
+
+    def get(uid):
+        uid = uid.replace("\\", "/")
+        return pool.get(uid)
+
+    # 测试样本：按 manifest 记录的成员顺序拼接，再按原规则截断
+    test_dir = os.path.join(args.out_dir, "test"); os.makedirs(test_dir, exist_ok=True)
+    want = man.get("test_sample_sha256", {})
+    ok_all, test_paths = True, []
+    for name, members in man["test_samples"].items():
+        buf, missing = io.BytesIO(), []
+        for uid in members:
+            u = get(str(uid))
+            if u is None:
+                missing.append(uid); continue
+            buf.write(u["bytes"]); buf.write(b"\n")
+        data = cut_at_newline(buf.getvalue(), margs["test_size"])
+        p = os.path.join(test_dir, name); open(p, "wb").write(data); test_paths.append(p)
+        h = sha(data)
+        status = ("OK" if want.get(name) == h else "MISMATCH") if name in want else "no reference hash"
+        ok_all &= (status != "MISMATCH") and not missing
+        print(f"{name}: {len(data):,} bytes  sha256={h[:16]}…  {status}"
+              + (f"  [缺少 {len(missing)} 个单元，例如 {missing[:3]}]" if missing else ""))
+
+    # 训练分片：manifest 中列出的训练单元（顺序不影响结果的可比性）
+    rng = random.Random(margs.get("seed", 0))
+    groups = [("train_cpp", man.get("rocksdb_train", [])), ("train_extra", man.get("extra_train", [])),
+              ("train_py", man.get("python_train", []))]
+    train_paths = []
+    for prefix, ids in groups:
+        units = [get(str(i)) for i in ids]
+        miss = sum(u is None for u in units)
+        units = [u for u in units if u is not None]
+        if miss:
+            print(f"[Warn] {prefix}: manifest 中 {miss} 个单元本地找不到（extra 通常是 PyTorch 版本不同所致）")
+        if units:
+            train_paths += write_shards(units, os.path.join(args.out_dir, "train"), prefix, margs["shard_size"], rng)
+    open(os.path.join(args.out_dir, "train_list.txt"), "w").write("\n".join(train_paths) + "\n")
+    open(os.path.join(args.out_dir, "test_list.txt"), "w").write("\n".join(test_paths) + "\n")
+    print(f"\n测试样本 {'全部与 manifest 一致' if ok_all else '存在不一致，见上'}；"
+          f"训练分片 {len(train_paths)} 个 -> {os.path.join(args.out_dir, 'train')}")
+
+
+# ------------------------------------------------------------
 # Main
 # ------------------------------------------------------------
 
@@ -245,7 +305,12 @@ def main():
     ap.add_argument("--max_bytes", type=int, default=512 * 1024)
     ap.add_argument("--shard_size", type=int, default=1 << 20)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--from_manifest", default="",
+                    help="按已有 manifest.json 精确重建测试样本与训练分片（复现论文数据用）")
     args = ap.parse_args()
+    if args.from_manifest:
+        rebuild_from_manifest(args)
+        return
     rng = random.Random(args.seed)
 
     # 1) 收集
@@ -335,6 +400,7 @@ def main():
         "python_test": sorted(str(u["id"]) for u in py_test),
         "extra_train": sorted(u["source"] + "/" + u["id"] for u in extra),
         "test_samples": {os.path.basename(p): m for p, m in zip(test_paths, members)},
+        "test_sample_sha256": {os.path.basename(p): sha(open(p, "rb").read()) for p in test_paths},
         "stats": {
             "train_mb": sum(len(u["bytes"]) for u in rdb_train + py_train + extra) / 1e6,
             "extra_train_mb": sum(len(u["bytes"]) for u in extra) / 1e6,
