@@ -4,7 +4,7 @@ Medusa Head Training（domain-level）
 
 用法：
   # Wiki：训练集 = 目录下所有文件 - 测试的 10 个；随机留 5 个文件做验证
-  python train_medusa_domain.py train \
+  python train_Mhead_shared.py train \
       --model_name Qwen/Qwen2.5-0.5B \
       --train_files "/data/wiki/*.txt" \
       --test_files  "/data/wiki_test/*.txt" \
@@ -13,7 +13,7 @@ Medusa Head Training（domain-level）
       --num_heads 5 --max_length 1024 --batch_size 4 --bf16
 
   # 在 10 个测试样本上评估
-  python train_medusa_domain.py eval \
+  python train_Mhead_shared.py eval \
       --model_name Qwen/Qwen2.5-0.5B \
       --medusa_heads_dir ./medusa_domain_wiki/best \
       --test_files "/data/wiki_test/*.txt" \
