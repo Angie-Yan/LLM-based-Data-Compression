@@ -489,7 +489,7 @@ def main():
         if args.input_file and os.path.exists(args.input_file):
             ok = verify(tokenizer, args.input_file, args.output_file, decoded, ref_tokens)
             raise SystemExit(0 if ok else 1)
-        print("（未提供 --input_file，跳过无损验证）")
+        print("（--input_file not exists，skip the losslessness verify）")
 
 
 if __name__ == "__main__":
