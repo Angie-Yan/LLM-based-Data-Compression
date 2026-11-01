@@ -22,7 +22,7 @@ We evaluate our compression framework on both general text and source code bench
 
 ### Plain-Text Dataset (Wikipedia)
 For text compression, we use the preprocessed **Simple English Wikipedia** dataset (Version 2) available on Kaggle:
-- **Download:** [Plain-text Wikipedia SimpleEnglish (Kaggle)]([https://www.kaggle.com/datasets/ffatty/plain-text-wikipedia-simpleenglish](https://www.kaggle.com/datasets/ffatty/plain-text-wikipedia-simpleenglish/versions/2))
+- **Download:** [Plain-text Wikipedia SimpleEnglish (Kaggle)](https://www.kaggle.com/datasets/ffatty/plain-text-wikipedia-simpleenglish/versions/2)
 
 Please download the dataset manually and place the extracted text file under the `data/` directory:
 ```text
