@@ -477,8 +477,8 @@ class FastRankDecoder:
 # ==========================================
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--draft_model_name", type=str, default="Qwen/Qwen1.5-0.5B")
-    parser.add_argument("--target_model_name", type=str, default="Qwen/Qwen1.5-7B")
+    parser.add_argument("--draft_model_name", type=str, default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--target_model_name", type=str, default="Qwen/Qwen2.5-7B")
     parser.add_argument("--gamma", type=int, default=64, help="投机步长 N")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--context_length", type=int, default=1024)
@@ -518,9 +518,8 @@ def main():
         attn_implementation=args.attn_implementation,
     ).eval()
 
-    lora_model_path = ("/root/yanzhe/yanzhe/FineZip-main/finezip/finetuned_models/"
-                       "h100/Qwen0.5b/wiki_05_newloss_128_r16")
-    # Lora权重,不用的时候记得注释掉下两行
+    lora_model_path = ("<lora_path>")
+    # Lora weight
     # draft_model = PeftModel.from_pretrained(draft_model, lora_model_path, torch_dtype=dtype)
     # draft_model = draft_model.merge_and_unload()
 
