@@ -205,7 +205,7 @@ def finetune(model_path,
         #     ),
 
         # use new loss function here:
-        criterion = CompressionLoss(alpha=1.0, beta=1.0, margin=1.5, omega=0.0, gamma=0.0, use_focal=True)
+        criterion = CompressionLoss(alpha=1.0, beta=1.0, margin=1.5, use_focal=True)
         # # 自定义trainer
         trainer = CustomSFTTrainer(
             model=model,
