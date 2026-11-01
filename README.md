@@ -102,4 +102,5 @@ cmp F d.txt && sha256sum F d.txt
 Important flags.
 
 --batch_invariant_attention --batch_invariant_linear are required for lossless FP16 decoding with teacher-forced encoding. Without them, encoder and decoder logits can differ in the last bits.
+
 --total_bits (AC only): probability quantization precision, default 2^24.
