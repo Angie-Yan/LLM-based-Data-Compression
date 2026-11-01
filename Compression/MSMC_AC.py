@@ -1,8 +1,27 @@
 """
-MSMC + Arithmetic Coding（domain head + teacher-forced encode + round-merged decode）
+MSMC + Arithmetic Coding（新 head 约定 + teacher-forced encode + round-merged decode）
 =====================================================================================
 依赖：同目录下的 medusa_rank_compress.py（复用 head 定义、backbone 前向、KV 调度、
 batch-invariant 补丁、无损验证），以及 batch_invariant_attention.py（如果开 FP16 补丁）。
+
+与旧版 Medusa+AC 脚本相比：
+  1. 新 head 约定：每轮 n 个位置 = [backbone lm_head(+1), head0(+2), head1(+3), ...]；
+     --round_size 1 时就是“backbone + AC”（即 AC baseline 的同一套 coder）。
+  2. 调度与 Rank 版完全一致：encode 多轮一次性 teacher forcing，decode 每轮 1 次 backbone 调用。
+  3. 不再把整张 CDF [B, V+1]（~155MB/位置）搬到 CPU：
+       encode：GPU 上 gather 出每条流的 [low, high]，每个子批只搬一次 [items, B, 2]；
+       decode：CPU 算出每条流的 target value（B 个整数）→ GPU 上 searchsorted 找 symbol
+               → 只搬回 [B, 3]；解出的 token 直接留在 GPU 上。
+  4. 频率量化：freq = 1 + floor(p * (T - V))，余数加到 argmax，保证总和恰好为 T，
+     默认 T = 2^24（旧版 2^20 + clamp(min=1) 会让 152K 个最小频率吃掉 ~15% 概率质量）。
+  5. 压缩文件是二进制：一行 JSON 头 + 每条流 packbits 后的字节。
+  6. 统计：每个位置的理想 bits（-log2 p）、量化后 bits、实际 AC bits；
+     以及 CPU 端 AC 时间占比（--profile 时额外同步测 backbone 时间），用于 Amdahl 分析。
+
+数值一致性：AC 要求编解码两端的量化 CDF 逐位一致（比 Rank-Tier 只要求 top-32 排序一致更严格）。
+encode 端 head/lm_head 的输入形状是 [B, n_rounds, d]，decode 端是 [B, 1, d]，
+所以 FP16 下需要 --fixed_tile_attention --batch_invariant_linear；softmax 两边都在 [B, V] 上做。
+"""
 
 import os
 import json
@@ -17,8 +36,8 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import Medusa_Compression as MC
-from Medusa_Compression import (
+import MSMC_RC as MC
+from MSMC_RC import (
     MedusaHeadCollection, backbone_forward, slice_kv_cache, get_kv_len,
     plan_encode_chunks, DTYPE_MAP, apply_precision_guards, register_attention_patch,
     warmup_and_reset_peak_memory, get_peak_reserved_gb, position_labels, verify, sha256_bytes,
@@ -443,13 +462,13 @@ def main():
                                                  attn_implementation=args.attn_implementation)
     if args.lora_path:
         from peft import PeftModel
-        print(f"[Warn] loading LoRA {args.lora_path}：please check its training file")
+        print(f"[Warn] 加载 LoRA {args.lora_path}：请确认它不是在测试文件上训练的")
         model = PeftModel.from_pretrained(model, args.lora_path, torch_dtype=dtype).merge_and_unload()
     model.eval()
 
     heads = MedusaHeadCollection.load(args.medusa_heads_dir, device, dtype=dtype).eval()
     if not heads.uses_base_for_first:
-        print("[Warn] This is old heads（head0 预测 +1），suggesting to use the new heads")
+        print("[Warn] 这是旧约定的 heads（head0 预测 +1），建议用新训练的 heads")
     if not (1 <= args.round_size <= heads.max_round_size):
         raise ValueError(f"round_size 必须在 [1, {heads.max_round_size}]")
     print(f"round_size n = {args.round_size}: " + ", ".join(position_labels(heads, args.round_size)))
@@ -470,7 +489,7 @@ def main():
         if args.input_file and os.path.exists(args.input_file):
             ok = verify(tokenizer, args.input_file, args.output_file, decoded, ref_tokens)
             raise SystemExit(0 if ok else 1)
-        print("（--input_file not extists，skip the losslessness verify）")
+        print("（未提供 --input_file，跳过无损验证）")
 
 
 if __name__ == "__main__":
