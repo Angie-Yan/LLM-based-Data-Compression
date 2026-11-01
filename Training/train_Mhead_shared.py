@@ -3,7 +3,7 @@ Medusa Head Training（domain-level）
 =========================================
 
 用法：
-  # Wiki：训练集 = 目录下所有文件 - 测试的 10 个；随机留 5 个文件做验证
+  # Wiki：training set = file under path - 10 test files；keep 5 files ramdomly to verify
   python train_Mhead_shared.py train \
       --model_name Qwen/Qwen2.5-0.5B \
       --train_files "/data/wiki/*.txt" \
@@ -12,7 +12,7 @@ Medusa Head Training（domain-level）
       --output_dir ./medusa_domain_wiki \
       --num_heads 5 --max_length 1024 --batch_size 4 --bf16
 
-  # 在 10 个测试样本上评估
+  # evaluation on 10 test files
   python train_Mhead_shared.py eval \
       --model_name Qwen/Qwen2.5-0.5B \
       --medusa_heads_dir ./medusa_domain_wiki/best \
@@ -422,7 +422,7 @@ def train(args):
 
 
 # ==========================================
-# 评估：测试文件上的每位置 bits / rank / 理想 bpb
+# Evaluation
 # ==========================================
 
 @torch.no_grad()
