@@ -38,90 +38,22 @@ For code compression, we provide a zero-configuration script to automatically do
 python scripts/Code_Data_Collection.py
 ```
 
+## Pretrained MSMC Heads
+
+One head set (K = 5 heads, FP16, ~1.4 GB) per domain, to train them yourself:
+
+```bash
+python Training/train_Mhead_shared.py train \
+    --model_name Qwen/Qwen2.5-0.5B-Instruct \
+    --train_files @data/<your_train_dataset_path> --test_files @data/<your_test_dataset_path> \
+    --val_num_files 5 --num_heads 5 --max_length 1024 --batch_size 4 --bf16 \
+    --output_dir ./MSMC_heads
+```
+
+
 ## Data Compression
 
 ### Arithmetic Coding
 
-Arithmetic Coding (AC) provides near-optimal entropy coding based on the probability distribution predicted by the language model. This script supports both compression and decompression pipelines with optional global mask space reduction.
-
-#### 1. Compress
-Compress a raw text dataset into a binary file:
-
-```bash
-# Compress plain-text dataset
-python Compression/Pure_AC.py \
-    --mode "compress" \
-    --model_name "Qwen2.5-0.5B" \
-    --input_path "data/<path_to_your_dataset>" \
-    --output_path "out.bin" \
-    --context_length 1024 \
-    --batch_size 256 \
-    --print_results
-```
-
-#### Decompress
-
-Reconstruct the original text from the compressed binary file:
-
-```bash
-python Compression/Pure_AC.py \
-    --mode "decompress" \
-    --model_name "Qwen2.5-0.5B" \
-    --input_path "out.bin" \
-    --context_length 1024 \
-    --batch_size 256 \
-    --print_results
-```
-
-### Rank Coding
-
-Run rank-based compression and decompression verification:
-
-```bash
-# Basic run without LoRA
-python Compression/Fast_Rank_Compression.py \
-    --model_name "Qwen2.5-0.5B" \
-    --input_file "data/<path_to_your_dataset>" \
-    --dtype "fp16" \
-    --batch_size 256
-```
-
-Run with custom LoRA weights
-```bash
-python Compression/Fast_Rank_Compression.py \
-    --model_name "Qwen2.5-0.5B" \
-    --lora_path "checkpoints/qwen_0.5b_lora" \
-    --input_file "data/<path_to_your_dataset>" \
-    --dtype "fp16" \
-    --batch_size 256
-```
-
-### Speculative compression (SDMC)
-
-
-
-### Medusa Compression
-
-Medusa-accelerated rank compression utilizes parallel decoding heads to speed up the compression and decompression pipeline.
-
-```bash
-# Standard run with pre-trained Medusa heads
-python Compression/Medusa_Compression.py \
-    --model_name "Qwen2.5-0.5B" \
-    --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
-    --input_file "data/<path_to_your_dataset>" \
-    --dtype "fp16" \
-    --batch_size 256
-```
-
-Run with a subset of active heads (e.g., test 3 active heads (total heads > 3) without retraining)
-
-```bash
-python Compression/Medusa_Compression.py \
-    --model_name "Qwen2.5-0.5B" \
-    --medusa_heads_dir "checkpoints/medusa_heads_qwen0.5b" \
-    --num_active_heads 3 \
-    --input_file "data/<path_to_your_dataset>" \
-    --dtype "fp16" \
     --batch_size 256
 ```
