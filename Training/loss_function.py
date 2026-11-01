@@ -17,8 +17,6 @@ class CompressionLoss(nn.Module):
         self.alpha = alpha
         self.beta = beta
         self.margin = margin
-        self.omega = omega
-        self.gamma = gamma
         self.use_focal = use_focal
 
     def forward(self, logits, labels, base_logits=None):
@@ -63,8 +61,7 @@ class CompressionLoss(nn.Module):
 
         return loss, {"CE": loss_CE.detach().float().item(),
                       "Margin": loss_margin.detach().float().item(),
-                      "Entropy": loss_entropy.detach().float().item(),
-                      "KL": loss_KL.detach().float().item()}
+                      }
 
 
 
